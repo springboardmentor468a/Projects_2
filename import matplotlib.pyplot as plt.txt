@@ -1,0 +1,48 @@
+import matplotlib.pyplot as plt
+import cv2
+import random
+import os
+
+image_dir = "/content/images"
+mask_dir = "/content/annotations/trimaps"
+
+# Collect all image filenames
+image_files = sorted([f for f in os.listdir(image_dir) if f.endswith(".jpg")])
+
+# Randomly select 50 images
+sample_indices = random.sample(range(len(image_files)), 50)
+
+plt.figure(figsize=(15, 150))
+
+for i, idx in enumerate(sample_indices):
+    image_name = image_files[idx]
+    base_name = os.path.splitext(image_name)[0]  # remove .jpg
+    mask_name = base_name + ".png"              # corresponding mask
+
+    img_path = os.path.join(image_dir, image_name)
+    mask_path = os.path.join(mask_dir, mask_name)
+
+    # Read original image
+    image = cv2.imread(img_path)
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    # Read mask and check if it loaded properly
+    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        print(f"Skipping {mask_name}, not found.")
+        continue
+
+    # Display original
+    plt.subplot(50, 2, 2*i + 1)
+    plt.imshow(image)
+    plt.axis("off")
+    plt.title(f"Original {i+1}")
+
+    # Display mask
+    plt.subplot(50, 2, 2*i + 2)
+    plt.imshow(mask, cmap="gray")
+    plt.axis("off")
+    plt.title(f"Mask {i+1}")
+
+plt.tight_layout()
+plt.show()
