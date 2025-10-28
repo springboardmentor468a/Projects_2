@@ -1,0 +1,162 @@
+# Full Colab-ready: save RGB images + binary masks from COCO and visualize pairs
+# Install deps
+!pip install pycocotools opencv-python-headless matplotlib tqdm --quiet
+
+from pycocotools.coco import COCO
+from pathlib import Path
+import numpy as np
+import cv2, random, os, sys
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from math import ceil
+
+# ---------- CONFIG ----------
+COCO_ROOT = Path('/content/coco')                 # where COCO was unzipped
+ANNOT_PATH = COCO_ROOT / 'annotations' / 'instances_train2017.json'
+IMAGES_DIR = COCO_ROOT / 'train2017'
+OUT_ROOT = Path('/content/coco_output_rgb')       # outputs saved here
+NUM_TO_PROCESS = 100       # <<-- demo default; set to 20000 to process all 20k (large/timey)
+NUM_TO_DISPLAY = 50        # show this many original+masked pairs
+RANDOM_SEED = 42
+# ----------------------------
+
+random.seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+
+# Create output directories
+(OUT_ROOT / 'images').mkdir(parents=True, exist_ok=True)
+(OUT_ROOT / 'masks').mkdir(parents=True, exist_ok=True)
+
+# Basic checks
+if not ANNOT_PATH.exists():
+    raise SystemExit(f"ERROR: annotation file not found at {ANNOT_PATH}. Make sure /content/coco is unzipped correctly.")
+
+if not IMAGES_DIR.exists():
+    raise SystemExit(f"ERROR: images dir not found at {IMAGES_DIR}. Make sure train2017 is present.")
+
+# Load COCO
+print("Loading COCO annotations...")
+coco = COCO(str(ANNOT_PATH))
+all_img_ids = coco.getImgIds()
+print(f"Total annotated images available: {len(all_img_ids)}")
+
+# Choose sample image IDs
+num_to_collect = min(NUM_TO_PROCESS, len(all_img_ids))
+sample_ids = random.sample(all_img_ids, num_to_collect)
+print(f"Selected {len(sample_ids)} image IDs to process (NUM_TO_PROCESS={NUM_TO_PROCESS})")
+
+def build_combined_mask(img_info):
+    """
+    Create a combined binary mask (uint8, 0/255) for all instances in the image.
+    """
+    ann_ids = coco.getAnnIds(imgIds=img_info['id'], iscrowd=None)
+    if not ann_ids:
+        return None
+    anns = coco.loadAnns(ann_ids)
+    h, w = img_info['height'], img_info['width']
+    mask = np.zeros((h, w), dtype=np.uint8)
+    for a in anns:
+        try:
+            # annToMask returns 0/1 mask (numpy array HxW)
+            m = coco.annToMask(a)
+        except Exception:
+            # fallback for RLE polygons etc.
+            from pycocotools import mask as maskUtils
+            seg = a.get('segmentation')
+            if isinstance(seg, dict) and 'counts' in seg:
+                m = maskUtils.decode(seg)
+            else:
+                # attempt to convert polygon to RLE then decode (best-effort)
+                try:
+                    rle = maskUtils.frPyObjects(seg, h, w)
+                    m = maskUtils.decode(rle)
+                    # if m has shape (H, W, N) combine
+                    if m.ndim == 3:
+                        m = np.any(m, axis=2).astype(np.uint8)
+                except Exception:
+                    continue
+        if m is None:
+            continue
+        # Ensure binary
+        m_bin = (m > 0).astype(np.uint8)
+        mask = np.logical_or(mask, m_bin)
+    return (mask.astype(np.uint8) * 255)
+
+# Process images: read, convert to RGB, save rgb image and mask
+skipped = 0
+processed = 0
+print("Processing images and saving RGB images + masks ...")
+for img_id in tqdm(sample_ids, desc="Processing"):
+    info_list = coco.loadImgs(img_id)
+    if not info_list:
+        skipped += 1
+        continue
+    info = info_list[0]
+    src_path = IMAGES_DIR / info['file_name']
+    if not src_path.exists():
+        skipped += 1
+        continue
+
+    # read with OpenCV (BGR), convert to RGB
+    img_bgr = cv2.imread(str(src_path))
+    if img_bgr is None:
+        skipped += 1
+        continue
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+    # build mask
+    mask = build_combined_mask(info)  # None or HxW uint8 (0/255)
+    if mask is None:
+        mask = np.zeros((info['height'], info['width']), dtype=np.uint8)
+
+    # save image in RGB format (cv2.imwrite expects BGR, so convert back for correct file bytes)
+    out_img_path = OUT_ROOT / 'images' / info['file_name']
+    # ensure parent exists
+    out_img_path.parent.mkdir(parents=True, exist_ok=True)
+    # convert RGB -> BGR to use cv2.imwrite (so saved file has correct colors when opened by other viewers)
+    cv2.imwrite(str(out_img_path), cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR))
+
+    # save mask as single-channel PNG
+    out_mask_path = OUT_ROOT / 'masks' / info['file_name'].replace('.jpg', '_mask.png')
+    out_mask_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_mask_path), mask)
+
+    processed += 1
+
+print(f"Finished processing. Processed: {processed}, Skipped: {skipped}")
+print("Outputs saved under:", OUT_ROOT)
+
+# -------- Visualization: show NUM_TO_DISPLAY original + masked pairs ----------
+saved_images = sorted([p for p in (OUT_ROOT / 'images').iterdir() if p.suffix.lower() in ['.jpg','jpeg','png']])
+if len(saved_images) == 0:
+    print("No images saved; nothing to display.")
+else:
+    num_show = min(NUM_TO_DISPLAY, len(saved_images))
+    chosen = random.sample(saved_images, num_show)
+    cols = 10
+    rows = ceil(num_show / cols)
+    plt.figure(figsize=(cols * 2.2, rows * 2.2))
+    for i, p in enumerate(chosen):
+        # read saved RGB image to show
+        img = cv2.cvtColor(cv2.imread(str(p)), cv2.COLOR_BGR2RGB)
+        mask_file = (OUT_ROOT / 'masks' / p.name.replace('.jpg','_mask.png'))
+        if mask_file.exists():
+            mask_img = cv2.imread(str(mask_file), cv2.IMREAD_GRAYSCALE)
+        else:
+            mask_img = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
+        overlay = img.copy()
+        overlay[mask_img > 0] = (255, 0, 0)  # set masked pixels to red
+        ax = plt.subplot(rows*2, cols, 2*i+1); ax.imshow(img); ax.axis('off')
+        ax2 = plt.subplot(rows*2, cols, 2*i+2); ax2.imshow(overlay); ax2.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+# -------- Quick checks & download hint -------------
+num_saved = len(saved_images)
+num_masks = len(list((OUT_ROOT/'masks').glob('*_mask.png')))
+print("\nSUMMARY:")
+print(f" - Images saved (in RGB format): {num_saved} -> {OUT_ROOT}/images")
+print(f" - Masks saved: {num_masks} -> {OUT_ROOT}/masks")
+print("\nTo download outputs as a zip (from Colab VM), run:")
+print("!zip -r /content/coco_output_rgb.zip /content/coco_output_rgb")
+print("Then download /content/coco_output_rgb.zip from left Files pane.")
