@@ -1,4 +1,4 @@
-VisionExtract: Isolation from Images using Image Segmentation
+**VISIONEXTRACT : ISOLATION FROM IMAGES USING IMAGE SEGMENTATION**
 
 PROBLEM STATEMENT:
 
