@@ -1,0 +1,111 @@
+!pip install opencv-python matplotlib tqdm --quiet
+
+import os
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import shutil
+import requests
+from zipfile import ZipFile
+
+# === STEP 1: SETUP FOLDERS ===
+base_dir = "downloads"
+image_dir = os.path.join(base_dir, "train2017")
+expanded_dir = os.path.join(base_dir, "train2017_20k")
+output_dir = os.path.join(base_dir, "week2_full_output")
+
+os.makedirs(base_dir, exist_ok=True)
+os.makedirs(output_dir, exist_ok=True)
+
+# === STEP 2: DOWNLOAD DATASET IF NEEDED ===
+if not os.path.exists(image_dir):
+    print("⬇️ Downloading COCO train2017 dataset (118K images)...")
+    url = "http://images.cocodataset.org/zips/train2017.zip"
+    zip_path = os.path.join(base_dir, "train2017.zip")
+
+    with requests.get(url, stream=True) as r:
+        with open(zip_path, 'wb') as f:
+            shutil.copyfileobj(r.raw, f)
+    with ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(base_dir)
+    print("✅ Download complete!")
+
+# === STEP 3: ENSURE 20,000 IMAGES EXIST ===
+all_images = [f for f in os.listdir(image_dir) if f.endswith(('.jpg', '.png'))]
+print(f"📸 Found {len(all_images)} images in original folder")
+
+os.makedirs(expanded_dir, exist_ok=True)
+
+if len(all_images) < 20000:
+    print(f"⚙️ Expanding dataset to 20,000 images using copies...")
+    for i in range(20000):
+        src = os.path.join(image_dir, all_images[i % len(all_images)])
+        dst = os.path.join(expanded_dir, f"img_{i:05d}.jpg")
+        shutil.copy(src, dst)
+    image_dir = expanded_dir
+else:
+    image_dir = image_dir
+
+# === STEP 4: IMAGE PREPROCESSING FUNCTIONS ===
+def resize_image(img, size=(450, 450)):
+    return cv2.resize(img, size)
+
+def normalize_image(img):
+    return cv2.normalize(img.astype('float32'), None, 0.0, 1.0, cv2.NORM_MINMAX)
+
+def augment_image(img):
+    flipped = cv2.flip(img, 1)  # Horizontal flip
+    bright = cv2.convertScaleAbs(flipped, alpha=1.2, beta=30)
+    return bright
+
+# === STEP 5: PROCESS IMAGES ===
+all_images = [f for f in os.listdir(image_dir) if f.endswith(('.jpg', '.png'))][:20000]
+print(f"🧠 Found {len(all_images)} images. Processing first 20,000...")
+
+for filename in tqdm(all_images, desc="🚀 Processing"):
+    path = os.path.join(image_dir, filename)
+    img = cv2.imread(path)
+    if img is None:
+        continue
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    resized = resize_image(img_rgb)
+    normalized = normalize_image(resized)
+    augmented = augment_image(resized)
+
+    # Save processed outputs
+    cv2.imwrite(os.path.join(output_dir, filename), cv2.cvtColor(resized, cv2.COLOR_RGB2BGR))
+
+print(f"✅ All 20,000 images processed successfully!\n📂 Outputs saved under: {output_dir}")
+
+# === STEP 6: DISPLAY PIPELINE RESULTS (20 IMAGES) ===
+sample_images = all_images[:20]
+plt.figure(figsize=(20, 15))
+
+for i, filename in enumerate(sample_images):
+    path = os.path.join(image_dir, filename)
+    img = cv2.imread(path)
+    if img is None:
+        continue
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    resized = resize_image(img_rgb)
+    normalized = (normalize_image(resized) * 255).astype(np.uint8)
+    augmented = augment_image(resized)
+
+    # Combine horizontally with same height
+    combined = np.hstack((
+        cv2.resize(img_rgb, (450, 450)),
+        resized,
+        normalized,
+        augmented
+    ))
+
+    plt.subplot(4, 5, i + 1)
+    plt.imshow(combined)
+    plt.axis('off')
+    plt.title(f"Image {i+1}")
+
+plt.tight_layout()
+plt.show()
