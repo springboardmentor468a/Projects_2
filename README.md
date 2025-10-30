@@ -1,6 +1,6 @@
 ## Project Notebook
 
-The code-only notebook (`ImageSegmentation.ipynb`) is included in this repository.
+The code-only notebook (`Week-2 Task.ipynb`) is included in this repository.
 
 The full notebook with all 50 image outputs was too large for GitHub. You can view the complete file with all outputs on Google Drive.
 
