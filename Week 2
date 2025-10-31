@@ -1,0 +1,70 @@
+from pathlib import Path
+from PIL import Image
+import torch
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms, utils
+import matplotlib.pyplot as plt
+import numpy as np
+
+PROJECT = Path("C:/Users/smile/projects/coco")
+ORIG_DIR = PROJECT / "output" / "original"
+PROC_DIR = PROJECT / "output" / "processed"
+
+# basic checks
+if not ORIG_DIR.exists():
+    raise FileNotFoundError(f"Original folder not found: {ORIG_DIR}")
+if not PROC_DIR.exists():
+    raise FileNotFoundError(f"Processed folder not found: {PROC_DIR}")
+
+transform = transforms.Compose([
+    transforms.Resize((450, 450)),
+    transforms.ToTensor(),   # -> [0,1]
+])
+
+class PairDataset(Dataset):
+    def __init__(self, orig_folder, proc_folder, transform=None):
+        self.orig_folder = Path(orig_folder)
+        self.proc_folder = Path(proc_folder)
+        self.transform = transform
+        orig_files = {p.name: p for p in self.orig_folder.glob("*.jpg")}
+        proc_files = {p.name: p for p in self.proc_folder.glob("*.jpg")}
+        common = sorted(set(orig_files.keys()).intersection(proc_files.keys()))
+        if len(common) == 0:
+            raise RuntimeError("No matching filenames found between original and processed folders.")
+        self.samples = [(orig_files[n], proc_files[n]) for n in common]
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        p_o, p_p = self.samples[idx]
+        img_o = Image.open(p_o).convert("RGB")
+        img_p = Image.open(p_p).convert("RGB")
+        if self.transform:
+            img_o = self.transform(img_o)
+            img_p = self.transform(img_p)
+        return img_o, img_p, p_o.name
+
+# load all pairs
+ds = PairDataset(ORIG_DIR, PROC_DIR, transform=transform)
+loader = DataLoader(ds, batch_size=20, shuffle=False)  # load all (20) into single batch
+
+batch = next(iter(loader))
+orig_batch, proc_batch, names = batch  # tensors [B,3,450,450]
+B = orig_batch.size(0)
+
+# Compose a grid where top row = originals, bottom row = processed
+combined = torch.cat([orig_batch, proc_batch], dim=0)  # (2B,3,H,W)
+# make a grid with nrow = B (so top row originals, second row processed)
+grid = utils.make_grid(combined, nrow=B, padding=4, pad_value=1.0)
+
+# convert to numpy for matplotlib (C,H,W -> H,W,C)
+npimg = grid.mul(255).byte().permute(1,2,0).cpu().numpy()
+
+# display with matplotlib
+plt.figure(figsize=(min(20, B*2), 6))  # width scales with #images
+plt.imshow(npimg)
+plt.axis('off')
+plt.title("Top: Originals | Bottom: Processed")
+plt.tight_layout()
+plt.show()
