@@ -1,0 +1,156 @@
+import os, shutil, zipfile, random
+from pathlib import Path
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+import torch
+import torchvision.transforms as T
+
+try:
+    from google.colab import files as colab_files
+    IN_COLAB = True
+except Exception:
+    IN_COLAB = False
+
+OUT_PROCESSED_DIR = "processed_20"
+OUT_MASK_DIR = "processed_masks"
+IMG_DIR = "my_images"             # where images will be gathered
+TMP_EXTRACT_DIR = "tmp_extracted_images"
+SEED = 20251029
+random.seed(SEED)
+
+os.makedirs(OUT_PROCESSED_DIR, exist_ok=True)
+os.makedirs(OUT_MASK_DIR, exist_ok=True)
+os.makedirs(IMG_DIR, exist_ok=True)
+
+def find_images_anywhere(root='.'):
+    exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')
+    found = []
+    for r, _, files in os.walk(root):
+        for f in files:
+            if f.lower().endswith(exts):
+                found.append(os.path.join(r, f))
+    return found
+
+def extract_zip_to(tmp_dir, zip_path):
+    Path(tmp_dir).mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(zip_path, 'r') as z:
+        z.extractall(tmp_dir)
+
+def move_images_to_folder(img_paths, dest_folder):
+    Path(dest_folder).mkdir(parents=True, exist_ok=True)
+    moved = []
+    for p in img_paths:
+        src = Path(p)
+        if src.parent == Path(dest_folder):
+            moved.append(src)
+            continue
+        dest = Path(dest_folder) / src.name
+   
+        if dest.exists():
+            base = dest.stem
+            suf = dest.suffix
+            i = 1
+            while True:
+                candidate = Path(dest_folder) / f"{base}_{i}{suf}"
+                if not candidate.exists():
+                    dest = candidate
+                    break
+                i += 1
+        shutil.copy(src, dest)  # copy rather than move, safer for nested files
+        moved.append(dest)
+    return [Path(p) for p in moved]
+
+found_images = find_images_anywhere('.')
+found_images = [p for p in found_images if '.ipynb_checkpoints' not in p]
+
+if len(found_images) == 0:
+    if IN_COLAB:
+        print("No images found in the notebook environment. Opening upload dialog — please select your 20 image files (or a single .zip).")
+        uploaded = colab_files.upload()  # opens upload dialog
+        if len(uploaded) == 0:
+            raise SystemExit("No files uploaded. Please run the cell again and select your image files or a zip.")
+
+        found_post = find_images_anywhere('.')
+   
+        zips = [f for f in uploaded.keys() if f.lower().endswith('.zip')]
+        if zips:
+        
+            print("Detected uploaded zip(s):", zips)
+            extract_zip_to(TMP_EXTRACT_DIR, zips[0])
+    
+            found_post = find_images_anywhere(TMP_EXTRACT_DIR)
+        if len(found_post) == 0:
+            raise SystemExit("Upload succeeded but no image files were found in uploads or inside the uploaded zip.")
+  
+        moved = move_images_to_folder(found_post, IMG_DIR)
+        all_images = moved
+    else:
+      
+        print("No images found in the current working directory.")
+        print("If you're running locally, please put your images in this notebook's folder or run an upload step.")
+        print("You can upload files in local Jupyter via the UI, or place them into a folder and re-run this cell.")
+        raise SystemExit("No images to process. Upload or place images and re-run.")
+else:
+
+    print(f"Found {len(found_images)} image file(s) in the workspace.")
+
+    all_images = move_images_to_folder(found_images, IMG_DIR)
+
+
+all_images = [Path(p) for p in all_images]
+print(f"Images to process (count = {len(all_images)}). Sample:")
+for p in all_images[:20]:
+    print(" -", p)
+
+pipeline = T.Compose([
+    T.Resize((450, 450)),
+    T.RandomHorizontalFlip(p=0.5),
+    T.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.4, hue=0.1),
+    T.RandomRotation(degrees=20),
+    T.RandomApply([T.GaussianBlur(kernel_size=5)], p=0.5),
+    T.RandomApply([T.RandomAdjustSharpness(sharpness_factor=2)], p=0.3),
+    T.ToTensor(),
+])
+
+def tensor_to_pil(tensor):
+    tensor = tensor.clamp(0,1)
+    arr = (tensor * 255).byte().permute(1,2,0).numpy()
+    return Image.fromarray(arr)
+
+def create_binary_mask(processed_pil):
+    img = np.array(processed_pil)
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    _, mask = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return Image.fromarray(mask)
+
+print("\nStarting processing loop...")
+for idx, p in enumerate(all_images):
+    try:
+        orig = Image.open(p).convert("RGB")
+    except Exception as e:
+        print(f"Skipping {p} (cannot open): {e}")
+        continue
+
+    proc_tensor = pipeline(orig)
+    proc_pil = tensor_to_pil(proc_tensor)
+    mask_pil = create_binary_mask(proc_pil)
+
+    proc_out = Path(OUT_PROCESSED_DIR) / f"proc_{p.name}"
+    mask_out = Path(OUT_MASK_DIR) / f"mask_{p.name}"
+    proc_pil.save(proc_out)
+    mask_pil.save(mask_out)
+
+    if idx < 10:
+        fig, ax = plt.subplots(1,3, figsize=(12,4))
+        ax[0].imshow(orig); ax[0].set_title("Original"); ax[0].axis("off")
+        ax[1].imshow(proc_pil); ax[1].set_title("Processed"); ax[1].axis("off")
+        ax[2].imshow(mask_pil, cmap='gray'); ax[2].set_title("Mask"); ax[2].axis("off")
+        plt.show()
+
+    print(f"[{idx+1}/{len(all_images)}] Saved: {proc_out} , {mask_out}")
+
+print("\nAll done. Processed images saved to:", OUT_PROCESSED_DIR)
+print("Masks saved to:", OUT_MASK_DIR)
+
