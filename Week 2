@@ -6,19 +6,19 @@ import matplotlib.pyplot as plt
 import torchvision.transforms as T
 import torch
 
-IMAGE_DIR = "my_images"         # ✅ your uploaded images
-OUT_DIR = "processed_20"        # folder for processed images
+IMAGE_DIR = "my_images"        
+OUT_DIR = "processed_20"      
 random.seed(20251029)
 
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# List all image files
+
 img_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff')
 all_images = [p for p in Path(IMAGE_DIR).iterdir() if p.suffix.lower() in img_exts]
 
 print("Found", len(all_images), "images.")
 
-# Transform pipeline
+
 pipeline = T.Compose([
     T.Resize((450, 450)),
     T.RandomHorizontalFlip(p=0.5),
@@ -34,21 +34,19 @@ def tensor_to_pil(tensor):
     arr = (tensor * 255).byte().permute(1,2,0).numpy()
     return Image.fromarray(arr)
 
-# Process each image
 for p in all_images:
     orig = Image.open(p).convert("RGB")
     processed = pipeline(orig)
     processed_pil = tensor_to_pil(processed)
 
-    # Show original and processed
     fig, ax = plt.subplots(1,2, figsize=(10,5))
     ax[0].imshow(orig); ax[0].set_title("Original"); ax[0].axis("off")
     ax[1].imshow(processed_pil); ax[1].set_title("Processed"); ax[1].axis("off")
     plt.show()
 
-    # Save processed
     out_path = os.path.join(OUT_DIR, f"proc_{p.name}")
     processed_pil.save(out_path)
     print("Saved:", out_path)
 
 print("✅ Done processing all images!")
+
