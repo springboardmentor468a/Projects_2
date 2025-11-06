@@ -53,3 +53,5 @@ class CarSegmentationDataset(Dataset):
         mask = transforms.ToTensor()(mask)
 
         return image, mask
+
+# update for consistency

@@ -35,3 +35,5 @@ class UNet(nn.Module):
         d2 = self.up2(d1)
         d2 = self.dec2(torch.cat([d2, e1], dim=1))
         return torch.sigmoid(self.out(d2))
+
+# update for consistency

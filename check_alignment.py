@@ -27,3 +27,5 @@ plt.subplot(1,2,2)
 plt.imshow(mask, cmap='gray')
 plt.title("Mask")
 plt.show()
+
+# update for consistency

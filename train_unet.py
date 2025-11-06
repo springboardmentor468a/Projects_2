@@ -46,4 +46,6 @@ class UNet(nn.Module):
 
         self.bottleneck = nn.Sequential(CBR(128, 256), CBR(256, 256))
 
-        self.up1 = nn.ConvTranspose2d(256, 128, 2, s
+        self.up1 = nn.ConvTranspose2d(256, 128, 2, s )
+
+# update for consistency
