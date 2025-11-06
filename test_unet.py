@@ -49,5 +49,4 @@ plt.title("Overlay (Mask on Image)")
 plt.axis("off")
 plt.show()
 
-# update for consistency
 

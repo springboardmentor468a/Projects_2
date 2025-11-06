@@ -48,4 +48,3 @@ class UNet(nn.Module):
 
         self.up1 = nn.ConvTranspose2d(256, 128, 2, s )
 
-# update for consistency

@@ -54,4 +54,3 @@ class CarSegmentationDataset(Dataset):
 
         return image, mask
 
-# update for consistency

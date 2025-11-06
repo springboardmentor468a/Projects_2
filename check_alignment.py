@@ -28,4 +28,3 @@ plt.imshow(mask, cmap='gray')
 plt.title("Mask")
 plt.show()
 
-# update for consistency
