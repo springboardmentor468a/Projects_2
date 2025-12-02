@@ -1,0 +1,117 @@
+"""
+COCO Dataset Visualizer
+-----------------------
+This script downloads COCO 2017 annotations + validation images
+and visualizes object masks for a subset of images.
+
+Author: YOUR_NAME
+Repository: YOUR_REPOSITORY
+"""
+
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from pycocotools.coco import COCO
+
+
+# ------------------------------------------------------------
+# 1. Create required folders
+# ------------------------------------------------------------
+def create_dirs():
+    os.makedirs("annotations", exist_ok=True)
+    os.makedirs("val2017", exist_ok=True)
+    print("📁 Directories ready.")
+
+
+# ------------------------------------------------------------
+# 2. Download dataset safely (val + annotations only to save space)
+# ------------------------------------------------------------
+def download_coco():
+    print("\n⬇️ Downloading COCO dataset (safe minimal version)…")
+
+    # Annotation file
+    if not os.path.exists("annotations/instances_val2017.json"):
+        os.system("wget -q http://images.cocodataset.org/annotations/annotations_trainval2017.zip")
+        os.system("unzip -qq annotations_trainval2017.zip -d annotations")
+        os.system("mv annotations/annotations/instances_val2017.json annotations/")
+        os.system("rm -rf annotations/annotations")
+        print("✅ Annotations downloaded.")
+    else:
+        print("✔ Annotations already exist.")
+
+    # Validation images (small-size)
+    if not os.path.exists("val2017/val2017"):
+        os.system("wget -q http://images.cocodataset.org/zips/val2017.zip")
+        os.system("unzip -qq val2017.zip -d val2017")
+        print("✅ Validation images downloaded.")
+    else:
+        print("✔ Validation images already exist.")
+
+    print("\n📦 Dataset setup complete.\n")
+
+
+# ------------------------------------------------------------
+# 3. Visualize COCO images & masks
+# ------------------------------------------------------------
+def visualize_images(annotation_file, image_dir, num_samples=10):
+    print("🔍 Loading COCO annotations...\n")
+    coco = COCO(annotation_file)
+
+    img_ids = coco.getImgIds()
+    random.shuffle(img_ids)
+
+    shown = 0
+    for img_id in img_ids:
+        if shown >= num_samples:
+            break
+
+        img_info = coco.loadImgs(img_id)[0]
+        img_path = os.path.join(image_dir, img_info["file_name"])
+
+        if not os.path.exists(img_path):
+            continue
+
+        ann_ids = coco.getAnnIds(imgIds=img_id)
+        anns = coco.loadAnns(ann_ids)
+        if not anns:
+            continue
+
+        # Read image
+        img = np.array(Image.open(img_path).convert("RGB"))
+
+        # Mask
+        mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
+        for ann in anns:
+            mask = np.maximum(mask, coco.annToMask(ann))
+
+        masked_img = img.copy()
+        masked_img[mask == 0] = 0
+
+        # Display
+        fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+        ax[0].imshow(img); ax[0].set_title("Original"); ax[0].axis("off")
+        ax[1].imshow(masked_img); ax[1].set_title("Masked Object"); ax[1].axis("off")
+
+        plt.tight_layout()
+        plt.show()
+
+        shown += 1
+        print(f"📸 Visualized {shown}/{num_samples}")
+
+    print("\n🎯 Visualization complete!")
+
+
+# ------------------------------------------------------------
+# 4. Main Entry
+# ------------------------------------------------------------
+if __name__ == "__main__":
+    create_dirs()
+    download_coco()
+
+    ANNOTATION_FILE = "annotations/instances_val2017.json"
+    IMAGE_DIR = "val2017/val2017"
+    NUM_SAMPLES = 20
+
+    visualize_images(ANNOTATION_FILE, IMAGE_DIR, NUM_SAMPLES)
