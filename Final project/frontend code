@@ -1,0 +1,73 @@
+# app.py
+import io
+from pathlib import Path
+from PIL import Image
+import streamlit as st
+import torch
+
+# Backend imports
+from seg_backend import load_model, segment_object_only
+
+# ----------------- UI Config -----------------
+st.set_page_config(page_title="SegMe", layout="wide")
+st.markdown("<h1 style='text-align:center; color:#1A5276;'>SegMe — Object-Only Masking</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center;'>Only the subject is visible; background completely removed.</p>", unsafe_allow_html=True)
+st.markdown("---")
+
+# ----------------- Sample Inputs -----------------
+BASE_DIR = Path(__file__).parent
+SAMPLES_DIR = BASE_DIR / "samples"
+
+sample_input_path = SAMPLES_DIR / "sample_input.jpg"
+sample_output_path = SAMPLES_DIR / "sample_output.png"
+
+st.subheader("Sample Input & Output")
+col1, col2 = st.columns(2)
+
+with col1:
+    if sample_input_path.exists():
+        st.image(Image.open(sample_input_path), caption="Sample Input", width=300)
+
+with col2:
+    if sample_output_path.exists():
+        st.image(Image.open(sample_output_path), caption="Sample Output", width=300)
+
+st.markdown("---")
+st.subheader("Try it Yourself")
+
+uploaded = st.file_uploader("Upload your image", type=['jpg', 'jpeg', 'png', 'webp'])
+bg_color = st.color_picker("Background color", "#000000")
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = load_model(device)
+
+# ----------------- User Processing -----------------
+if uploaded:
+    user_img = Image.open(uploaded).convert("RGB")
+    st.markdown("**User Input**")
+    st.image(user_img, width=360)
+
+    if st.button("Process Image"):
+        with st.spinner("Generating precise object-only mask..."):
+            rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0,2,4))
+
+            out_img = segment_object_only(
+                user_img,
+                model,
+                device=device,
+                bg_color=rgb
+            )
+
+        st.markdown("**User Output**")
+        st.image(out_img, width=360)
+
+        buf = io.BytesIO()
+        out_img.save(buf, format="PNG")
+        buf.seek(0)
+
+        st.download_button(
+            "Download Masked PNG",
+            data=buf,
+            file_name="masked_output.png",
+            mime="image/png"
+        )
