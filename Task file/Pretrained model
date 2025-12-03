@@ -1,1 +1,187 @@
+# main.py
 
+import os
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models, transforms
+from pycocotools.coco import COCO
+
+# ---------------- CONFIGURATION ----------------
+CONFIG = {
+    "ROOT_DIR": "/root/.cache/kagglehub/datasets/awsaf49/coco-2017-dataset/versions/2/coco2017/train2017",
+    "ANN_FILE": "/root/.cache/kagglehub/datasets/awsaf49/coco-2017-dataset/versions/2/coco2017/annotations/instances_train2017.json",
+    "IMAGE_SIZE": 256,
+    "BATCH_SIZE": 16,
+    "LR": 1e-4,
+    "EPOCHS": 5,
+    "NUM_IMAGES": 40000,
+    "DEVICE": "cuda" if torch.cuda.is_available() else "cpu"
+}
+
+# ---------------- DATASET ----------------
+class COCOSegmentationDataset(Dataset):
+    def __init__(self, root_dir, ann_file, transform=True, num_samples=None):
+        self.root_dir = root_dir
+        self.coco = COCO(ann_file)
+        self.transform = transform
+
+        self.ids = [img_id for img_id in sorted(self.coco.imgs.keys())
+                    if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
+        if num_samples:
+            self.ids = self.ids[:num_samples]
+
+    def __getitem__(self, index):
+        img_id = self.ids[index]
+        ann_ids = self.coco.getAnnIds(imgIds=img_id)
+        coco_anns = self.coco.loadAnns(ann_ids)
+
+        img_info = self.coco.loadImgs(img_id)[0]
+        img_path = os.path.join(self.root_dir, img_info['file_name'])
+        image = Image.open(img_path).convert('RGB')
+
+        mask = np.zeros((img_info['height'], img_info['width']))
+        for ann in coco_anns:
+            mask = np.maximum(mask, self.coco.annToMask(ann))
+        mask = Image.fromarray(mask * 255).convert("L")
+
+        if self.transform:
+            image = image.resize((CONFIG['IMAGE_SIZE'], CONFIG['IMAGE_SIZE']), Image.BILINEAR)
+            mask = mask.resize((CONFIG['IMAGE_SIZE'], CONFIG['IMAGE_SIZE']), Image.NEAREST)
+            image = transforms.ToTensor()(image)
+            mask = transforms.ToTensor()(mask)
+
+        return image, mask
+
+    def __len__(self):
+        return len(self.ids)
+
+# ---------------- MODEL ----------------
+class ConvBlock(nn.Module):
+    def __init__(self, in_c, out_c):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_c, out_c, 3, padding=1),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_c, out_c, 3, padding=1),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True)
+        )
+    def forward(self, x):
+        return self.conv(x)
+
+class ResNetUNet(nn.Module):
+    def __init__(self, n_classes=1):
+        super().__init__()
+        base_model = models.resnet34(weights=models.ResNet34_Weights.DEFAULT)
+        self.base_layers = list(base_model.children())
+
+        self.layer0 = nn.Sequential(*self.base_layers[:3])
+        self.layer1 = nn.Sequential(*self.base_layers[3:5])
+        self.layer2 = self.base_layers[5]
+        self.layer3 = self.base_layers[6]
+        self.layer4 = self.base_layers[7]
+
+        for layer in [self.layer0, self.layer1, self.layer2, self.layer3, self.layer4]:
+            for param in layer.parameters():
+                param.requires_grad = False
+
+        self.up4 = nn.ConvTranspose2d(512, 256, 2, stride=2)
+        self.decoder4 = ConvBlock(512, 256)
+        self.up3 = nn.ConvTranspose2d(256, 128, 2, stride=2)
+        self.decoder3 = ConvBlock(256, 128)
+        self.up2 = nn.ConvTranspose2d(128, 64, 2, stride=2)
+        self.decoder2 = ConvBlock(128, 64)
+        self.up1 = nn.ConvTranspose2d(64, 64, 2, stride=2)
+        self.decoder1 = ConvBlock(128, 64)
+        self.final_upsample = nn.ConvTranspose2d(64, 32, 2, stride=2)
+        self.final_conv = nn.Conv2d(32, n_classes, 1)
+
+    def forward(self, x):
+        x0 = self.layer0(x)
+        x1 = self.layer1(x0)
+        x2 = self.layer2(x1)
+        x3 = self.layer3(x2)
+        x4 = self.layer4(x3)
+
+        d4 = self.up4(x4)
+        d4 = torch.cat([d4, x3], dim=1)
+        d4 = self.decoder4(d4)
+
+        d3 = self.up3(d4)
+        d3 = torch.cat([d3, x2], dim=1)
+        d3 = self.decoder3(d3)
+
+        d2 = self.up2(d3)
+        d2 = torch.cat([d2, x1], dim=1)
+        d2 = self.decoder2(d2)
+
+        d1 = self.up1(d2)
+        d1 = torch.cat([d1, x0], dim=1)
+        d1 = self.decoder1(d1)
+
+        out = self.final_upsample(d1)
+        return self.final_conv(out)
+
+# ---------------- TRAINING FUNCTION ----------------
+def train_model(model, loader, config):
+    device = config['DEVICE']
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=config['LR'])
+
+    model.train()
+    for epoch in range(config['EPOCHS']):
+        loop = tqdm(loader, desc=f"Epoch {epoch+1}/{config['EPOCHS']}")
+        epoch_loss = 0
+        for images, masks in loop:
+            images, masks = images.to(device), masks.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, masks)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item()
+            loop.set_postfix(loss=loss.item())
+        print(f"Epoch {epoch+1} Loss: {epoch_loss/len(loader):.4f}")
+    return model
+
+# ---------------- VISUALIZATION ----------------
+def visualize_results(model, loader, device, num_images=5):
+    model.eval()
+    displayed = 0
+    for images, masks in loader:
+        images = images.to(device)
+        with torch.no_grad():
+            preds = torch.sigmoid(model(images))
+            preds_binary = (preds > 0.5).float()
+        for i in range(images.shape[0]):
+            if displayed >= num_images:
+                return
+            img_np = images[i].permute(1,2,0).cpu().numpy()
+            img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min())
+            mask_np = masks[i].squeeze().cpu().numpy()
+            pred_np = preds_binary[i].squeeze().cpu().numpy()
+            subject_rgb = img_np * np.dstack([pred_np]*3)
+            plt.figure(figsize=(15,5))
+            plt.subplot(1,4,1); plt.imshow(img_np); plt.title("Image"); plt.axis('off')
+            plt.subplot(1,4,2); plt.imshow(mask_np, cmap='gray'); plt.title("GT Mask"); plt.axis('off')
+            plt.subplot(1,4,3); plt.imshow(pred_np, cmap='gray'); plt.title("Pred Mask"); plt.axis('off')
+            plt.subplot(1,4,4); plt.imshow(subject_rgb); plt.title("Subject in RGB"); plt.axis('off')
+            plt.show()
+            displayed += 1
+
+# ---------------- MAIN ----------------
+if __name__ == "__main__":
+    train_dataset = COCOSegmentationDataset(CONFIG['ROOT_DIR'], CONFIG['ANN_FILE'], transform=True, num_samples=CONFIG['NUM_IMAGES'])
+    train_loader = DataLoader(train_dataset, batch_size=CONFIG['BATCH_SIZE'], shuffle=True, num_workers=2, pin_memory=True)
+
+    model = ResNetUNet().to(CONFIG['DEVICE'])
+    trained_model = train_model(model, train_loader, CONFIG)
+    visualize_results(trained_model, train_loader, CONFIG['DEVICE'], num_images=5)
