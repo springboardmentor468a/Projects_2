@@ -1,7 +1,17 @@
-## Project Notebook
+SMART SEGMENTATION
+Advanced AI Background Removal, Replacement & Blur — Streamlit + Pillow + rembg==2.0.67 + PyTorch
 
-The code-only notebook (`Week-2 Task.ipynb`) is included in this repository.
+🚀 Overview
+Smaert Segmentation is a modern web application for automated image background processing using ML model.
+Everything runs inside a Docker container, making deployment smooth on Render
 
-The full notebook with all 50 image outputs was too large for GitHub. You can view the complete file with all outputs on Google Drive.
+✨ Features
+⭐ Background Removal (U-Net model)
+🎨 Replace Background (Solid Color / Custom Image)
+🎛 Adjustable Background Blur
+📦 Batch Processing of Multiple Images
+🖼 Sample Gallery
+🎥 Cinematic Hero Section with Video
+📱 Responsive UI with Glassmorphism Design
 
-[**View Full Notebook (with 50 outputs) on Google Drive**](https://drive.google.com/drive/folders/1RSm7mkqIQLLtoG2HVi6sVQQq1r_3cuBb?usp=drive_link)
+Deployment Link : https://appapp-bps5hrhwbwpkqhantqba5u.streamlit.app
