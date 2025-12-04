@@ -1,0 +1,132 @@
+# SHOW: combined 4-panel grid per image, displayed in batches of 5 images per figure
+from pathlib import Path
+import torch
+import torchvision.transforms as T
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+import torch.nn as nn, torch.nn.functional as F
+import random
+
+# -------------- Adjust these if needed --------------
+IMG_SIZE = 256
+BATCH_SIZE = 5        # how many images to show per figure (rows per figure)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+PROCESSED_DIR = Path("processed_20")
+MASK_DIR = Path("processed_masks")
+MODEL_PATH = "best_model.pth"
+# ----------------------------------------------------
+
+# --- small UNet definition (must match training model) ---
+class DoubleConv(nn.Module):
+    def __init__(self, in_c, out_c):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_c, out_c, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_c, out_c, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(inplace=True),
+        )
+    def forward(self,x): return self.net(x)
+
+class Down(nn.Module):
+    def __init__(self,in_c,out_c):
+        super().__init__(); self.net = nn.Sequential(nn.MaxPool2d(2), DoubleConv(in_c,out_c))
+    def forward(self,x): return self.net(x)
+
+class Up(nn.Module):
+    def __init__(self,in_c,out_c):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_c,out_c,2,stride=2)
+        self.conv = DoubleConv(in_c,out_c)
+    def forward(self,x1,x2):
+        x1 = self.up(x1)
+        diffY = x2.size()[2] - x1.size()[2]; diffX = x2.size()[3] - x1.size()[3]
+        x1 = F.pad(x1, [diffX//2, diffX-diffX//2, diffY//2, diffY-diffY//2])
+        x = torch.cat([x2,x1], dim=1); return self.conv(x)
+
+class UNetSmall(nn.Module):
+    def __init__(self, n_channels=3, n_classes=1, base=16):
+        super().__init__()
+        self.inc = DoubleConv(n_channels, base)
+        self.down1 = Down(base, base*2)
+        self.down2 = Down(base*2, base*4)
+        self.up1 = Up(base*4, base*2)
+        self.up2 = Up(base*2, base)
+        self.outc = nn.Conv2d(base, n_classes, 1)
+    def forward(self,x):
+        x1 = self.inc(x); x2 = self.down1(x1); x3 = self.down2(x2)
+        x = self.up1(x3, x2); x = self.up2(x, x1); x = self.outc(x); return x
+
+# --- load model ---
+model = UNetSmall(n_channels=3, n_classes=1).to(DEVICE)
+ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
+model.load_state_dict(ckpt["model_state"])
+model.eval()
+
+# --- helpers ---
+def key_from_path(p):
+    s = p.stem.lower()
+    s = s.replace("proc_", "").replace("mask_", "").replace("processed_","").replace("image_","")
+    s = s.replace("-", "_")
+    return s
+
+proc_list = sorted([p for p in PROCESSED_DIR.glob("*") if p.suffix.lower() in ('.jpg','.jpeg','.png')])
+mask_list = sorted([p for p in MASK_DIR.glob("*") if p.suffix.lower() in ('.jpg','.jpeg','.png')])
+
+# map and pair
+proc_map = { key_from_path(p): p for p in proc_list }
+mask_map = { key_from_path(p): p for p in mask_list }
+common_keys = sorted(set(proc_map.keys()) & set(mask_map.keys()))
+if len(common_keys) == 0:
+    raise SystemExit("No paired processed images & masks found. Ensure processed_20/ and processed_masks/ exist.")
+
+paired = [(proc_map[k], mask_map[k]) for k in common_keys]
+print(f"Displaying {len(paired)} paired images (showing in batches of {BATCH_SIZE}).")
+
+# predict helper
+to_tensor = T.ToTensor()
+def predict_mask_pil(img_pil):
+    img = img_pil.resize((IMG_SIZE, IMG_SIZE)).convert("RGB")
+    tensor = to_tensor(img).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        out = torch.sigmoid(model(tensor))[0,0].cpu().numpy()
+    mask = (out > 0.5).astype("uint8") * 255
+    return Image.fromarray(mask)
+
+# batching display
+for batch_start in range(0, len(paired), BATCH_SIZE):
+    batch = paired[batch_start: batch_start + BATCH_SIZE]
+    rows = len(batch); cols = 4
+    fig, axes = plt.subplots(rows, cols, figsize=(cols*3.3, rows*3.0))
+    if rows == 1:
+        axes = np.expand_dims(axes, 0)  # make 2D for consistent indexing
+    for i, (proc_p, mask_p) in enumerate(batch):
+        # load images
+        orig = Image.open(proc_p).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
+        true_mask = Image.open(mask_p).convert("L").resize((IMG_SIZE, IMG_SIZE))
+        pred_mask = predict_mask_pil(orig)
+
+        # create overlay: red where pred_mask
+        mask_arr = np.array(pred_mask)
+        overlay = np.zeros((IMG_SIZE, IMG_SIZE, 4), dtype=np.uint8)
+        overlay[...,0] = 255                    # red channel
+        overlay[...,3] = (mask_arr // 2)        # alpha (128 where mask 255)
+        overlay_img = Image.fromarray(overlay, mode="RGBA")
+        blended = Image.alpha_composite(orig.convert("RGBA"), overlay_img)
+
+        # plot 4 panels: Original | True Mask | Pred Mask | Overlay
+        ax0 = axes[i, 0]
+        ax1 = axes[i, 1]
+        ax2 = axes[i, 2]
+        ax3 = axes[i, 3]
+
+        ax0.imshow(orig); ax0.set_title("Original\n" + proc_p.name, fontsize=8); ax0.axis("off")
+        ax1.imshow(true_mask, cmap="gray"); ax1.set_title("True Mask", fontsize=8); ax1.axis("off")
+        ax2.imshow(pred_mask, cmap="gray"); ax2.set_title("Predicted", fontsize=8); ax2.axis("off")
+        ax3.imshow(blended); ax3.set_title("Overlay", fontsize=8); ax3.axis("off")
+
+    plt.tight_layout()
+    plt.show()
