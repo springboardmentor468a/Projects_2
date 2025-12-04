@@ -112,7 +112,7 @@ st.markdown("""
 # --------------------------------------------------------------------
 #  MODEL LOADING - USING .pth FILE
 # --------------------------------------------------------------------
-@st.cache_resource(show_spinner=False)
+@st.cache_resource
 def load_segmentation_model():
     MODEL_PATH = "best_mobilenetv3_unet.pth"
     try:
@@ -122,6 +122,11 @@ def load_segmentation_model():
             in_channels=3,
             classes=1
         )
+        # Check if model file exists
+        if not os.path.exists(MODEL_PATH):
+            st.warning(f"Model file not found: {MODEL_PATH}")
+            return None, False
+            
         checkpoint = torch.load(MODEL_PATH, map_location='cpu')
         
         if 'state_dict' in checkpoint:
@@ -132,8 +137,10 @@ def load_segmentation_model():
         model.eval()
         return model, True
     except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
         return None, False
 
+# Load model
 model, MODEL_LOADED = load_segmentation_model()
 
 # --------------------------------------------------------------------
@@ -156,6 +163,21 @@ def create_mask_overlay(image, mask, alpha=0.6):
     
     overlay = cv2.addWeighted(image_np, 1 - alpha, colored_mask, alpha, 0)
     return overlay
+
+def create_black_background_cutout(image, mask):
+    """Create cutout with BLACK background"""
+    image_np = np.array(image)
+    mask_resized = cv2.resize(mask, (image_np.shape[1], image_np.shape[0]))
+    
+    # Create black background
+    black_bg = np.zeros_like(image_np)
+    
+    # Copy object pixels where mask is > 0
+    object_mask = mask_resized > 0.3
+    for i in range(3):
+        black_bg[:, :, i] = image_np[:, :, i] * object_mask
+    
+    return black_bg
 
 def apply_image_adjustments(image, adjustments):
     img = image.copy()
@@ -245,21 +267,15 @@ def process_image_optimized(uploaded_file):
             original_np = np.array(adjusted_img)
             mask_original_size = cv2.resize(mask, (original_np.shape[1], original_np.shape[0]))
             
-            # Create proper cutout
-            cutout_rgba = np.zeros((original_np.shape[0], original_np.shape[1], 4), dtype=np.uint8)
-            
-            object_mask = mask_original_size > 0
-            for i in range(3):
-                cutout_rgba[:, :, i] = original_np[:, :, i] * object_mask
-            
-            cutout_rgba[:, :, 3] = object_mask * 255
+            # Create BLACK background cutout
+            cutout_black = create_black_background_cutout(adjusted_img, mask)
             
             overlay = create_mask_overlay(adjusted_img, mask)
             
             result = {
                 'original': original_img,
                 'adjusted': adjusted_img,
-                'cutout': cutout_rgba,
+                'cutout': cutout_black,  # This is now BLACK background
                 'overlay': overlay,
                 'mask': mask_original_size
             }
@@ -270,6 +286,7 @@ def process_image_optimized(uploaded_file):
         return result
         
     except Exception as e:
+        st.error(f"Processing error: {str(e)}")
         return None
 
 # --------------------------------------------------------------------
@@ -318,10 +335,10 @@ def show_home_page():
     
     with col1:
         try:
-            sample_before_path = "D:\\Segmentation_App\\sample_original2.jpg"
+            sample_before_path = "sample_original2.jpg"
             if os.path.exists(sample_before_path):
                 sample_before = Image.open(sample_before_path)
-                st.image(sample_before, width=250, use_container_width=False)
+                st.image(sample_before, width=250)
                 st.markdown('<div class="image-label">Original</div>', unsafe_allow_html=True)
             else:
                 st.image("https://via.placeholder.com/250x200/667eea/ffffff?text=ORIGINAL", width=250)
@@ -335,10 +352,10 @@ def show_home_page():
     
     with col3:
         try:
-            sample_after_path = "D:\\Segmentation_App\\sample_output2.jpg"
+            sample_after_path = "sample_output2.jpg"
             if os.path.exists(sample_after_path):
                 sample_after = Image.open(sample_after_path)
-                st.image(sample_after, width=250, use_container_width=False)
+                st.image(sample_after, width=250)
                 st.markdown('<div class="image-label">Cutout</div>', unsafe_allow_html=True)
             else:
                 st.image("https://via.placeholder.com/250x200/96CEB4/2c3e50?text=CUTOUT", width=250)
@@ -401,10 +418,10 @@ def show_manual_edit_page():
         
         with tab1:
             cutout_display = st.session_state.processed_image['cutout'][:, :, :3]
-            st.image(cutout_display, use_container_width=True)
+            st.image(cutout_display)
         
         with tab2:
-            st.image(st.session_state.processed_image['overlay'], use_container_width=True)
+            st.image(st.session_state.processed_image['overlay'])
     
     with col2:
         st.subheader("Manual Settings")
@@ -457,17 +474,19 @@ def show_export_page():
     
     with col1:
         cutout_display = st.session_state.processed_image['cutout'][:, :, :3]
-        st.image(cutout_display, use_container_width=True, caption="CUTOUT")
+        st.image(cutout_display)
+        st.caption("CUTOUT")
     
     with col2:
-        st.image(st.session_state.processed_image['overlay'], use_container_width=True, caption="MASK OVERLAY")
+        st.image(st.session_state.processed_image['overlay'])
+        st.caption("MASK OVERLAY")
     
     st.subheader("Download")
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         buf_png = io.BytesIO()
-        cutout_pil = Image.fromarray(st.session_state.processed_image['cutout'], 'RGBA')
+        cutout_pil = Image.fromarray(st.session_state.processed_image['cutout'])
         cutout_pil.save(buf_png, format="PNG")
         st.download_button(
             "PNG FORMAT",
@@ -502,7 +521,7 @@ def show_export_page():
     
     with col4:
         zip_data = create_zip_file({
-            "cutout": Image.fromarray(st.session_state.processed_image['cutout'], 'RGBA'),
+            "cutout": Image.fromarray(st.session_state.processed_image['cutout']),
             "overlay": Image.fromarray(st.session_state.processed_image['overlay'])
         })
         st.download_button(
@@ -616,13 +635,17 @@ def main():
                 col1, col2 = st.columns(2)
                 
                 with col1:
-                    st.image(processed_data['original'], use_container_width=True, caption="Original")
-                    st.image(processed_data['adjusted'], use_container_width=True, caption="Adjusted")
+                    st.image(processed_data['original'])
+                    st.caption("Original")
+                    st.image(processed_data['adjusted'])
+                    st.caption("Adjusted")
                 
                 with col2:
                     cutout_display = processed_data['cutout'][:, :, :3]
-                    st.image(cutout_display, use_container_width=True, caption="CUTOUT")
-                    st.image(processed_data['overlay'], use_container_width=True, caption="MASK OVERLAY")
+                    st.image(cutout_display)
+                    st.caption("CUTOUT")
+                    st.image(processed_data['overlay'])
+                    st.caption("MASK OVERLAY")
                 
                 if st.button("Process New Image", use_container_width=True):
                     st.session_state.show_uploader = False
