@@ -8,8 +8,6 @@ import shutil
 import numpy as np
 
 import torch
-import segmentation_models_pytorch as smp
-import torchvision.transforms as T
 from PIL import Image
 
 
@@ -25,44 +23,110 @@ os.makedirs(app.config['BATCH_FOLDER'], exist_ok=True)
 # ----------------- MODEL LOADING (from checkpoint) -----------------
 device = torch.device("cpu")  # or "cuda" if available
 
-MODEL_PATH = "pretrained_unet_checkpoint.pth"
-GDRIVE_FILE_ID = "1b6Mb9awooNGRXTZJHz_4ExWuPbrKXpML"  # Your file ID
-GDRIVE_URL = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
+# Use absolute path to the checkpoint in the project folder
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+checkpoint_dir = os.path.join(BASE_DIR, "split_checkpoint")
 
-if not os.path.exists(MODEL_PATH):
-    print("Downloading model weights from Google Drive...")
-    gdown.download(GDRIVE_URL, MODEL_PATH, quiet=False)
-    print("Model downloaded successfully.")
-    
-# 1) Same architecture as training
-model = smp.Unet(
-    encoder_name="resnet101",
-    encoder_weights=None,   # using our own trained weights
-    in_channels=3,
-    classes=1,
-    activation=None
-)
+# Lazy model loader: keep app import-safe when deep deps are missing.
+model = None
+model_load_error = None
+device = torch.device("cpu")  # or "cuda" if available
 
-# 2) Load checkpoint directly
-checkpoint_path = "pretrained_unet_checkpoint.pth"  # put this file next to app.py
-checkpoint = torch.load(checkpoint_path, map_location=device)
-model.load_state_dict(checkpoint["model_state_dict"])
-model.to(device)
-model.eval()
+def ensure_model_loaded():
+    """Load segmentation model on first use. Raises RuntimeError with a helpful message if load fails."""
+    global model, model_load_error
+    if model is not None:
+        return
+    try:
+        # Some environments have an older torch where
+        # `torch.utils._pytree.register_pytree_node` is missing and
+        # imports like timm/transformers/segmentation_models_pytorch fail.
+        # As a pragmatic workaround, create a no-op stub if missing so
+        # these libraries can import. This is only a compatibility shim
+        # and may not fix deeper ABI mismatches; if loading still fails
+        # the exception below will provide guidance.
+        try:
+            import types as _types
+            import torch as _torch
+            if not hasattr(_torch.utils, '_pytree'):
+                _torch.utils._pytree = _types.SimpleNamespace()
+            if not hasattr(_torch.utils._pytree, 'register_pytree_node'):
+                def _dummy_register_pytree_node(*args, **kwargs):
+                    return None
+                _torch.utils._pytree.register_pytree_node = _dummy_register_pytree_node
+        except Exception:
+            # If any of this fails, we'll still attempt the real import
+            pass
+
+        import segmentation_models_pytorch as smp
+        # build model (same architecture used in training)
+        m = smp.Unet(
+            encoder_name="resnet101",
+            encoder_weights=None,
+            in_channels=3,
+            classes=1,
+            activation=None
+        )
+        # load checkpoint from split files
+        if not os.path.isdir(checkpoint_dir):
+            raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}. Run split_checkpoint.py to create it.")
+
+        checkpoint_files = sorted([os.path.join(checkpoint_dir, f) for f in os.listdir(checkpoint_dir) if f.startswith('checkpoint_part_') and f.endswith('.pth')])
+
+        if not checkpoint_files:
+            raise FileNotFoundError(f"No checkpoint parts found in {checkpoint_dir}")
+
+        # Load all parts and merge them into a single state_dict
+        full_state_dict = {}
+        for part_file in checkpoint_files:
+            part_state_dict = torch.load(part_file, map_location=device)
+            full_state_dict.update(part_state_dict)
+
+        m.load_state_dict(full_state_dict)
+        m.to(device)
+        m.eval()
+        model = m
+    except Exception as e:
+        model_load_error = e
+        # provide a concise guidance message
+        raise RuntimeError(
+            "Failed to load segmentation model: {}\n"
+            "Ensure torch/torchvision and segmentation-models-pytorch are installed and compatible.\n"
+            "See README or run recommended pip commands to install compatible versions.".format(repr(e))
+        )
 
 # 3) Preprocessing exactly as in SegmentationPairedDataset
-preprocess_224 = T.Compose([
-    T.Resize((224, 224)),
-    T.ToTensor()
-])
+def resize_to_224(pil_img):
+    return pil_img.resize((224, 224), resample=Image.BILINEAR)
 
-to_tensor = T.ToTensor()
+def pil_to_tensor(pil_img):
+    """Convert PIL RGB image to torch tensor [3,H,W] with float32 in [0,1]."""
+    arr = np.array(pil_img).astype('float32') / 255.0
+    if arr.ndim == 2:  # grayscale
+        arr = np.stack([arr, arr, arr], axis=-1)
+    # from H,W,3 -> 3,H,W
+    t = torch.from_numpy(arr).permute(2, 0, 1).contiguous()
+    return t
+
+def tensor_to_pil_mask(tensor):
+    """Convert a 2D torch tensor (H,W) with values 0/1 or 0-255 into a PIL Image (L)."""
+    arr = tensor.cpu().numpy()
+    if arr.dtype != 'uint8':
+        arr = (arr * 255).astype('uint8')
+    return Image.fromarray(arr)
 
 def predict_mask_from_pil(pil_img, threshold=0.3):
     """
     Returns preprocessed 224x224 image tensor and 224x224 binary mask.
     """
-    img_t = preprocess_224(pil_img)                 # [3,224,224]
+    # ensure model is loaded
+    try:
+        ensure_model_loaded()
+    except Exception as e:
+        raise RuntimeError(f"Model not available: {e}")
+
+    img_224 = resize_to_224(pil_img)
+    img_t = pil_to_tensor(img_224)                 # [3,224,224]
     x = img_t.unsqueeze(0).to(device)               # [1,3,224,224]
 
     with torch.no_grad():
@@ -72,6 +136,19 @@ def predict_mask_from_pil(pil_img, threshold=0.3):
         mask = (probs > threshold).float()[0, 0].cpu()   # [224,224]
 
     return img_t, mask
+
+
+# Attempt to load model at startup only when explicitly requested via env var.
+# This avoids out-of-memory crashes on small hosts (e.g., Render free instances).
+if os.getenv("LOAD_MODEL_ON_STARTUP", "0") == "1":
+    try:
+        if os.path.isdir(checkpoint_dir):
+            ensure_model_loaded()
+            print(f"Model loaded at startup from {checkpoint_dir}")
+    except Exception as e:
+        print(f"Model not loaded at startup: {e}")
+else:
+    print("Skipping model load at startup (set LOAD_MODEL_ON_STARTUP=1 to enable).")
 
 # ----------------- FLASK ROUTES -----------------
 def allowed_file(filename):
@@ -100,33 +177,52 @@ def upload_file():
         pil_img = Image.open(filepath).convert("RGB")
         orig_w, orig_h = pil_img.size
 
-        # Run model prediction (224x224)
-        img_t_224, mask_224 = predict_mask_from_pil(pil_img, threshold=0.3)
+        model_ok = True
+        model_err = None
+        try:
+            # Run model prediction (224x224)
+            img_t_224, mask_224 = predict_mask_from_pil(pil_img, threshold=0.3)
 
-        # Resize mask back to original size
-        mask_pil = T.ToPILImage()(mask_224)              # 224x224 -> PIL
-        mask_full_pil = mask_pil.resize((orig_w, orig_h))
-        mask_full_t = to_tensor(mask_full_pil)[0]        # [H,W] in {0,1}
+            # Resize mask back to original size
+            mask_pil = tensor_to_pil_mask(mask_224)              # 224x224 -> PIL
+            mask_full_pil = mask_pil.resize((orig_w, orig_h))
+            mask_arr = np.array(mask_full_pil)
 
-        # Apply mask to ORIGINAL image
-        img_orig_t = to_tensor(pil_img)                  # [3,H,W]
-        masked_full = img_orig_t * mask_full_t.unsqueeze(0)  # [3,H,W]
-        masked_full = masked_full.clamp(0.0, 1.0)
+            # Apply mask to ORIGINAL image (numpy path)
+            orig_arr = np.array(pil_img).astype('float32') / 255.0
+            mask_bool = mask_arr > 128
+            masked_rgb = orig_arr.copy()
+            masked_rgb[~mask_bool] = 0
+            masked_rgb = (masked_rgb * 255).astype('uint8')
 
-        masked_rgb = masked_full.permute(1, 2, 0).cpu().numpy()  # [H,W,3]
-
-        # Save masked output image at original resolution
-        base, ext = os.path.splitext(filename)
-        masked_name = f"{base}_masked.png"
-        masked_path = os.path.join(app.config['UPLOAD_FOLDER'], masked_name)
-        Image.fromarray((masked_rgb * 255).astype('uint8')).save(masked_path)
+            # Save masked output image at original resolution
+            base, ext = os.path.splitext(filename)
+            masked_name = f"{base}_masked.png"
+            masked_path = os.path.join(app.config['UPLOAD_FOLDER'], masked_name)
+            Image.fromarray(masked_rgb).save(masked_path)
+        except Exception as e:
+            # Model not available or failed; fall back to saving original as masked so UI can continue
+            model_ok = False
+            model_err = str(e)
+            base, ext = os.path.splitext(filename)
+            masked_name = f"{base}_masked.png"
+            masked_path = os.path.join(app.config['UPLOAD_FOLDER'], masked_name)
+            try:
+                pil_img.save(masked_path)
+            except Exception:
+                # last resort: write bytes from uploaded file
+                file.seek(0)
+                with open(masked_path, 'wb') as f:
+                    f.write(file.read())
 
 
         return jsonify({
             'success': True,
             'filename': filename,
             'url_original': f'/static/uploads/{filename}',
-            'url_masked': f'/static/uploads/{masked_name}'
+            'url_masked': f'/static/uploads/{masked_name}',
+            'model_available': model_ok,
+            'model_error': model_err
         })
 
     return jsonify({'error': 'Invalid file type'}), 400
@@ -180,25 +276,38 @@ def batch_upload():
             orig_w, orig_h = pil_img.size
 
             # Run model prediction
-            img_t_224, mask_224 = predict_mask_from_pil(pil_img, threshold=0.3)
+            model_ok = True
+            model_err = None
+            try:
+                img_t_224, mask_224 = predict_mask_from_pil(pil_img, threshold=0.3)
+                # Resize mask back to original size
+                mask_pil = tensor_to_pil_mask(mask_224)
+                mask_full_pil = mask_pil.resize((orig_w, orig_h))
+                mask_arr = np.array(mask_full_pil)
 
-            # Resize mask back to original size
-            mask_pil = T.ToPILImage()(mask_224)
-            mask_full_pil = mask_pil.resize((orig_w, orig_h))
-            mask_full_t = to_tensor(mask_full_pil)[0]
+                # Apply mask to ORIGINAL image (numpy path)
+                orig_arr = np.array(pil_img).astype('float32') / 255.0
+                mask_bool = mask_arr > 128
+                masked_rgb = orig_arr.copy()
+                masked_rgb[~mask_bool] = 0
+                masked_rgb = (masked_rgb * 255).astype('uint8')
 
-            # Apply mask to ORIGINAL image
-            img_orig_t = to_tensor(pil_img)
-            masked_full = img_orig_t * mask_full_t.unsqueeze(0)
-            masked_full = masked_full.clamp(0.0, 1.0)
-
-            masked_rgb = masked_full.permute(1, 2, 0).cpu().numpy()
-
-            # Save to batch folder
-            base, ext = os.path.splitext(filename)
-            masked_name = f"{base}_segmented.png"
-            masked_path = os.path.join(batch_dir, masked_name)
-            Image.fromarray((masked_rgb * 255).astype('uint8')).save(masked_path)
+                # Save to batch folder
+                base, ext = os.path.splitext(filename)
+                masked_name = f"{base}_segmented.png"
+                masked_path = os.path.join(batch_dir, masked_name)
+                Image.fromarray(masked_rgb).save(masked_path)
+            except Exception as e:
+                model_ok = False
+                model_err = str(e)
+                base, ext = os.path.splitext(filename)
+                masked_name = f"{base}_segmented.png"
+                masked_path = os.path.join(batch_dir, masked_name)
+                try:
+                    pil_img.save(masked_path)
+                except Exception:
+                    # fallback copy
+                    shutil.copy(filepath, masked_path)
 
 
             # Also save original to batch folder
@@ -256,7 +365,7 @@ def _render_masked_bytes(pil_img, fmt='png'):
 
     # Recompute mask to ensure accurate segmentation
     _, mask_224 = predict_mask_from_pil(pil_img, threshold=0.3)
-    mask_pil = T.ToPILImage()(mask_224)
+    mask_pil = tensor_to_pil_mask(mask_224)
     mask_full_pil = mask_pil.resize((orig_w, orig_h)).convert('L')
     mask_arr = np.array(mask_full_pil)
 
@@ -385,6 +494,32 @@ def get_batch_image(batch_id, filename):
 def editor():
     """Client-side image editor page."""
     return render_template('editor.html')
+
+
+@app.route('/model-status')
+def model_status():
+    """Return JSON with model load status and helpful version info."""
+    info = {
+        'model_loaded': model is not None,
+        'checkpoint_path': checkpoint_path,
+        'checkpoint_exists': os.path.exists(checkpoint_path),
+        'model_error': str(model_load_error) if model_load_error is not None else None,
+        'torch_version': None,
+        'smp_version': None,
+    }
+    try:
+        import torch as _t
+        info['torch_version'] = getattr(_t, '__version__', None)
+    except Exception:
+        info['torch_version'] = 'import-failed'
+
+    try:
+        import segmentation_models_pytorch as _smp
+        info['smp_version'] = getattr(_smp, '__version__', None)
+    except Exception:
+        info['smp_version'] = 'import-failed'
+
+    return jsonify(info)
 
 
 if __name__ == "__main__":
