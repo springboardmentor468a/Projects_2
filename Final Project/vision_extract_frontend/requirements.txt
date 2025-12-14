@@ -1,0 +1,6 @@
+Flask==3.1.2
+tensorflow==2.20.0
+numpy  # Let pip decide the version
+opencv-python==4.12.0.88
+Pillow==12.0.0
+Werkzeug==3.1.1
