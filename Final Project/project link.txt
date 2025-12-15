@@ -1,1 +1,1 @@
-visionextraxt-ary.streamlit.app
+visionextract-ary.streamlit.app
