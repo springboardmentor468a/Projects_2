@@ -40,6 +40,9 @@ Image 1 – Original
 Image 2 – Segmentation Mask
 Image 3 – Extracted Foreground
 
+<img width="736" height="731" alt="image" src="https://github.com/user-attachments/assets/3a6f8617-f21b-4742-af11-464355e58746" />
+
+
 # Technologies Used
 Python
 Keras / TensorFlow
