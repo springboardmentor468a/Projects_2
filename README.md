@@ -41,6 +41,12 @@ Image 2 – Segmentation Mask
 Image 3 – Extracted Foreground
 
 <img width="736" height="731" alt="image" src="https://github.com/user-attachments/assets/3a6f8617-f21b-4742-af11-464355e58746" />
+input image 
+
+<img width="128" height="128" alt="image" src="https://github.com/user-attachments/assets/57f21b3e-e302-42bd-b19a-491f2eaafe7c" />
+output image
+
+
 
 
 # Technologies Used
